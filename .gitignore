@@ -1,0 +1,2 @@
+# Ignore large ML models
+models/nutrient_model_v1.pkl
