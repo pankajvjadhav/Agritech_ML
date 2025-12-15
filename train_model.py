@@ -6,6 +6,9 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import train_test_split
 import joblib
+import json
+import sklearn
+from datetime import datetime
 
 # create synthetic dataset (same features order your service expects)
 n_samples = 2500
@@ -57,3 +60,13 @@ out = Path("models")
 out.mkdir(exist_ok=True)
 joblib.dump(model, out / "nutrient_model_v1.pkl")
 print("Saved model to:", (out / "nutrient_model_v1.pkl").resolve())
+meta = {
+    "model_file": "nutrient_model_v1.pkl",
+    "created_at": datetime.utcnow().isoformat() + "Z",
+    "sklearn_version": sklearn.__version__,
+    "feature_order": list(X.columns),
+    "notes": "synthetic dataset, random forest multioutput"
+}
+with open(out / "nutrient_model_v1.meta.json", "w", encoding="utf-8") as fh:
+    json.dump(meta, fh, indent=2)
+print("Saved metadata to:", (out / "nutrient_model_v1.meta.json").resolve())

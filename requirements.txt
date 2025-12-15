@@ -4,3 +4,6 @@ scikit-learn
 pydantic
 numpy
 joblib
+requests
+pandas
+pytest

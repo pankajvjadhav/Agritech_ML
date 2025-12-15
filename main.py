@@ -3,7 +3,12 @@ from pydantic import BaseModel
 import joblib, numpy as np, os, time, csv, json, logging
 from sklearn.multioutput import MultiOutputRegressor
 
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI(title="KisaanSaathi ML Service")
+
+from app.router import router
+app.include_router(router)
 
 MODEL_PATH = "models/nutrient_model_v1.pkl"
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "nutrient_model_v1")
@@ -102,10 +107,10 @@ class InputModel(BaseModel):
     elevation: float
     rainfall_30d: float
 
-@app.on_event("startup")
-def check_model():
-    if model is None:
-        logging.error("Model not loaded. Predictions will fail.")
+# @app.on_event("startup")
+# def check_model():
+#     if model is None:
+#         logging.error("Model not loaded. Predictions will fail.")
 
 @app.get("/")
 def root():
