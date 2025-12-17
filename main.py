@@ -1,13 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import joblib, numpy as np, os, time, csv, json, logging
-from sklearn.multioutput import MultiOutputRegressor
 
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="KisaanSaathi ML Service")
 
 from app.router import router
+from app.predictor import NUTRIENT_UNITS, compute_confidence_from_model
 app.include_router(router)
 
 MODEL_PATH = "models/nutrient_model_v1.pkl"
@@ -24,61 +24,6 @@ except Exception as e:
     model = None
 
 nutrient_keys = ["N","P","K","OC","pH","EC","S","Fe","Zn","Cu","B","Mn"]
-
-def compute_confidence_from_model(model, x):
-    """
-    Returns list of confidences for each nutrient (0..1).
-    Handles:
-      - model is an ensemble regressor (has estimators_ that each predict whole output)
-      - model is MultiOutputRegressor (model.estimators_ is list of per-target estimators).
-        If a per-target estimator itself has estimators_, compute std across its trees.
-      - fallback to fixed confidence (0.8)
-    """
-    try:
-        # Case A: single ensemble regressor that returns vector predictions per estimator
-        if hasattr(model, "estimators_") and not isinstance(model, MultiOutputRegressor):
-            preds = []
-            for est in model.estimators_:
-                p = np.array(est.predict(x), dtype=float).reshape(-1)
-                preds.append(p)
-            preds = np.stack(preds, axis=0)  # (n_estimators, n_targets)
-            mean = preds.mean(axis=0)
-            std = preds.std(axis=0)
-            rel = np.abs(std) / (np.abs(mean) + 1e-6)
-            alpha = 4.0
-            conf_raw = 1.0 / (1.0 + alpha * rel)
-            conf = np.clip(conf_raw, 0.2, 0.99)
-            return [float(c) for c in conf]
-
-        # Case B: MultiOutputRegressor => model.estimators_ is list of per-target estimators
-        if isinstance(model, MultiOutputRegressor) and hasattr(model, "estimators_"):
-            per_target_conf = []
-            for est in model.estimators_:
-                # If per-target estimator is itself an ensemble (e.g., RandomForest), use its estimators_
-                if hasattr(est, "estimators_") and len(getattr(est, "estimators_")) > 0:
-                    tree_preds = []
-                    for tree in est.estimators_:
-                        p = np.array(tree.predict(x), dtype=float).reshape(-1)  # shape (1,)
-                        tree_preds.append(p[0])
-                    arr = np.array(tree_preds, dtype=float)  # shape (n_trees,)
-                    mean = arr.mean()
-                    std = arr.std()
-                    rel = abs(std) / (abs(mean) + 1e-6)
-                    alpha = 4.0
-                    conf_raw = 1.0 / (1.0 + alpha * rel)
-                    conf_val = float(np.clip(conf_raw, 0.2, 0.99))
-                    per_target_conf.append(conf_val)
-                else:
-                    # no internal ensemble for this target -> fallback
-                    per_target_conf.append(0.8)
-            if len(per_target_conf) < len(nutrient_keys):
-                per_target_conf += [0.8] * (len(nutrient_keys) - len(per_target_conf))
-            return [float(c) for c in per_target_conf[:len(nutrient_keys)]]
-
-    except Exception as e:
-        logging.exception("Confidence computation failed: %s", e)
-
-    return [0.8] * len(nutrient_keys)
 
 def append_log(inputs: dict, preds: dict, model_version: str):
     header = ["timestamp", "model_version", "input_json", "predictions_json"]
@@ -138,7 +83,7 @@ def predict(payload: InputModel):
     pl = pl[:len(nutrient_keys)]
 
     # compute confidences
-    confidences = compute_confidence_from_model(model, x)
+    confidences = compute_confidence_from_model(model, x, nutrient_keys=nutrient_keys)
 
     # compute stds when possible
     stds = None
@@ -165,7 +110,7 @@ def predict(payload: InputModel):
         conf = float(confidences[i]) if confidences and i < len(confidences) else 0.8
         preds[k] = {
             "value": None if val is None else round(val, 6),
-            "unit": "mg/kg" if k not in ("pH",) else "pH",
+            "unit": NUTRIENT_UNITS.get(k, "mg/kg"),
             "confidence": round(conf, 4),
             "method": "ml",
             "std": None if not stds else (None if i >= len(stds) else (round(stds[i],6) if stds[i] is not None else None)),
