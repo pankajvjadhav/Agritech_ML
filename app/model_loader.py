@@ -3,29 +3,39 @@ import os
 import json
 import sklearn
 import logging
+import subprocess
+import sys
 
-# Get the directory of this file
 current_dir = os.path.dirname(__file__)
 MODEL_PATH = os.path.join(current_dir, "..", "models", "nutrient_model_v1.pkl")
+META_PATH = os.path.join(current_dir, "..", "models", "nutrient_model_v1.meta.json")
 
-meta_path = os.path.join(current_dir, "..", "models", "nutrient_model_v1.meta.json")
 logger = logging.getLogger(__name__)
-try:
+
+def ensure_model_exists():
+    if not os.path.exists(MODEL_PATH):
+        logger.warning("Model not found. Training model locally...")
+        subprocess.check_call(
+            [sys.executable, "tests/train_model.py"],
+            cwd=os.path.join(current_dir, "..")
+        )
+
+def load_model():
+    ensure_model_exists()
     model = joblib.load(MODEL_PATH)
-    logger.info("Loaded model from: %s", MODEL_PATH)
-    # attempt to load metadata
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fh:
-                meta = json.load(fh)
-            sklearn_used = meta.get("sklearn_version")
-            sklearn_runtime = sklearn.__version__
-            if sklearn_used != sklearn_runtime:
-                logger.warning("Model was trained with scikit-learn %s but runtime is %s. Consider re-training or pinning versions.", sklearn_used, sklearn_runtime)
-            else:
-                logger.info("Model sklearn version matches runtime: %s", sklearn_runtime)
-        except Exception as me:
-            print("Failed to read model metadata:", me)
-except Exception as e:
-    logger.error("Failed to load model: %s", e)
-    model = None
+    logger.info("Loaded model from %s", MODEL_PATH)
+
+    # Optional metadata validation
+    if os.path.exists(META_PATH):
+        with open(META_PATH, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        trained_version = meta.get("sklearn_version")
+        if trained_version != sklearn.__version__:
+            logger.warning(
+                "Model trained with sklearn %s but runtime is %s",
+                trained_version, sklearn.__version__
+            )
+
+    return model
+
+model = load_model()

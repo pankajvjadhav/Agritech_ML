@@ -31,10 +31,17 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-3. (Optional) If you need to generate a model, train it
+3. Model initialization (automatic)
 
-```
-python train_model.py
+The trained model file is not stored in Git.
+
+If the model file is missing, it will be automatically trained
+when the ML service starts and saved locally at:
+
+models/nutrient_model_v1.pkl
+
+(Manual training via `python train_model.py` is optional.)
+
 ```
 
 A trained model will be saved to `models/nutrient_model_v1.pkl`.
@@ -43,21 +50,19 @@ A trained model will be saved to `models/nutrient_model_v1.pkl`.
 
 ```
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+RunTest(optional)
 pytest tests/
 ```
 
 ## Notes
 - `train_model.py` uses `pandas` for data generation and model training, so `pandas` is included in `requirements.txt`.
 - `pytest` is included so tests can be run via the `pytest` command.
-- If `models/nutrient_model_v1.pkl` is missing, the API will still run but prediction values will be `null` and default confidence 0.0.
+
 - The `app/data_fetcher.py` functions make network calls to public APIs; they handle failures and return defaults when requests fail.
- - Satellite API keys (e.g., Agromonitoring) are optional for the realtime endpoint. You can provide them via the environment variable `AGROMONITOR_API_KEY` or pass as `--api-key` to `test_predict.py`.
+ - Satellite API keys (e.g., Agromonitoring) are optional for the realtime endpoint. You can provide them via the environment variable `AGROMONITOR_API_KEY` 
+ or pass as `--api-key` to `test_predict.py`.
 
-## Docker
-Build and run via Docker:
 
-```
-docker build -t agritech-ml .
 6. Test script format options
 
 `test_predict.py` supports multiple output formats using the `--format` flag:
@@ -86,3 +91,14 @@ docker run -p 8000:8000 agritech-ml
 
 ## Contact
 For further help, add an issue or reach out to the maintainer.
+
+## ML Model Setup
+
+The trained model file (`.pkl`) is not stored in Git.
+
+When the ML service starts and the model file is missing,
+it will automatically train the model and save it locally at:
+
+models/nutrient_model_v1.pkl
+
+No manual steps are required.
