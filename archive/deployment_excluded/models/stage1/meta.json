@@ -1,0 +1,28 @@
+{
+  "stage": "stage1",
+  "created_at": "2026-04-01T15:04:02.941361",
+  "features": [
+    "NDVI_mean",
+    "NDMI_mean",
+    "BSI_mean",
+    "NBR2_mean",
+    "VV_mean",
+    "VH_mean",
+    "VV_VH_ratio_mean",
+    "elevation",
+    "slope",
+    "LST_mean",
+    "rainfall_sum",
+    "rainfall_mean",
+    "rainfall_max",
+    "rainy_days",
+    "soil_type",
+    "month"
+  ],
+  "targets": [
+    "ph",
+    "ec",
+    "oc"
+  ],
+  "sklearn_version": "1.7.2"
+}

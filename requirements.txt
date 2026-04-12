@@ -1,9 +1,10 @@
 fastapi
 uvicorn
-scikit-learn
+scikit-learn==1.7.2
 pydantic
 numpy
 joblib
 requests
 pandas
 pytest
+earthengine-api

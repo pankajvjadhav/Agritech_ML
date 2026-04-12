@@ -38,18 +38,23 @@ The trained model file is not stored in Git.
 If the model file is missing, it will be automatically trained
 when the ML service starts and saved locally at:
 
-models/nutrient_model_v1.pkl
+models/nutrient_model_v2.pkl
 
 (Manual training via `python train_model.py` is optional.)
 
 ```
 
-A trained model will be saved to `models/nutrient_model_v1.pkl`.
+<<<<<<< Updated upstream
+A trained model will be saved to `data/satellite_input_data.csv
+`.
+=======
+A trained model will be saved to `models/nutrient_model_v2.pkl`.
+>>>>>>> Stashed changes
 
 4. Run the app
 
 ```
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 RunTest(optional)
 pytest tests/
 ```
@@ -99,6 +104,6 @@ The trained model file (`.pkl`) is not stored in Git.
 When the ML service starts and the model file is missing,
 it will automatically train the model and save it locally at:
 
-models/nutrient_model_v1.pkl
+models/nutrient_model_v2.pkl
 
 No manual steps are required.

@@ -1,173 +1,266 @@
-import numpy as np
+# app/predictor.py
+
 import pandas as pd
-import warnings
-from sklearn.multioutput import MultiOutputRegressor
 
-# Suppress sklearn warnings about feature names mismatch for tree estimators
-warnings.filterwarnings(
-    "ignore",
-    message="X has feature names, but DecisionTreeRegressor was fitted without feature names"
-)
-
-NUTRIENT_ORDER = ["N","P","K","OC","pH","EC","S","Fe","Zn","Cu","B","Mn"]
-
-# Unit map aligned to soil reporting standards
-NUTRIENT_UNITS = {
-    "N": "kg/ha",
-    "P": "kg/ha",     # P2O5 as requested
-    "K": "kg/ha",     # K2O as requested
-    "OC": "%",
-    "pH": "unitless",
-    "EC": "dS/m",#(deciSiemens per meter)
-    "S": "mg/kg",
-    "Fe": "mg/kg",
-    "Zn": "mg/kg",
-    "Cu": "mg/kg",
-    "B": "mg/kg",
-    "Mn": "mg/kg",
-}
-
-# Feature order must match the order used when training the model in train_model.py
-FEATURE_ORDER = [
-    "ndvi_mean_90d",
-    "ndvi_trend_30d",
-    "pH_0_30",
-    "soc_0_30",
-    "clay",
-    "silt",
-    "ndvi_std_90d",
-    "ndre_mean_90d",
-    "bsi_mean_90d",
-    "valid_obs_count",
-    "cloud_pct",
-    "area_ha",
-    "elevation",
-    "rainfall_30d",
-    "sand"
-]
-
-def _ensure_feature_names(model, feature_names):
-    """
-    Ensure model and its base estimators expose feature_names_in_ to silence sklearn warnings.
-    """
-    try:
-        if not hasattr(model, "feature_names_in_"):
-            model.feature_names_in_ = np.array(feature_names)
-        # Propagate to sub-estimators if present
-        if hasattr(model, "estimators_"):
-            for est in model.estimators_:
-                if not hasattr(est, "feature_names_in_"):
-                    est.feature_names_in_ = np.array(feature_names)
-    except Exception:
-        # Best effort; ignore if model structure differs
-        pass
-
-def compute_confidence_from_model(model, x, nutrient_keys=None):
-    """
-    Returns list of confidences for each nutrient (0..1).
-    Shared logic for both local and API predictions.
-    """
-    if nutrient_keys is None:
-        nutrient_keys = NUTRIENT_ORDER
-
-    try:
-        # Case A: single ensemble regressor that returns vector predictions per estimator
-        if hasattr(model, "estimators_") and not isinstance(model, MultiOutputRegressor):
-            preds = []
-            for est in model.estimators_:
-                p = np.array(est.predict(x), dtype=float).reshape(-1)
-                preds.append(p)
-            preds = np.stack(preds, axis=0)  # (n_estimators, n_targets)
-            mean = preds.mean(axis=0)
-            std = preds.std(axis=0)
-            rel = np.abs(std) / (np.abs(mean) + 1e-6)
-            alpha = 4.0
-            conf_raw = 1.0 / (1.0 + alpha * rel)
-            conf = np.clip(conf_raw, 0.2, 0.99)
-            return [float(c) for c in conf]
-
-        # Case B: MultiOutputRegressor => model.estimators_ is list of per-target estimators
-        if isinstance(model, MultiOutputRegressor) and hasattr(model, "estimators_"):
-            per_target_conf = []
-            for est in model.estimators_:
-                # If per-target estimator is itself an ensemble (e.g., RandomForest), use its estimators_
-                if hasattr(est, "estimators_") and len(getattr(est, "estimators_")) > 0:
-                    tree_preds = []
-                    for tree in est.estimators_:
-                        p = np.array(tree.predict(x), dtype=float).reshape(-1)  # shape (1,)
-                        tree_preds.append(p[0])
-                    arr = np.array(tree_preds, dtype=float)  # shape (n_trees,)
-                    mean = arr.mean()
-                    std = arr.std()
-                    rel = abs(std) / (abs(mean) + 1e-6)
-                    alpha = 4.0
-                    conf_raw = 1.0 / (1.0 + alpha * rel)
-                    conf_val = float(np.clip(conf_raw, 0.2, 0.99))
-                    per_target_conf.append(conf_val)
-                else:
-                    # no internal ensemble for this target -> fallback
-                    per_target_conf.append(0.8)
-            if len(per_target_conf) < len(nutrient_keys):
-                per_target_conf += [0.8] * (len(nutrient_keys) - len(per_target_conf))
-            return [float(c) for c in per_target_conf[:len(nutrient_keys)]]
-
-    except Exception:
-        # If anything fails, fall back to fixed confidences
-        pass
-
-    return [0.8] * len(nutrient_keys)
+from config.nutrients_ranges import NUTRIENT_RANGES
+from app.model_loader import STAGE2_MODELS, STAGE2_FEATURES
+from app.sulfur_boron_estimator import estimate_secondary_nutrients
 
 
-def make_prediction(model, features: dict):
-    if model is None:
-        # fallback if model missing
-        return {
-            code: {
-                "value": None,
-                "unit": NUTRIENT_UNITS.get(code, "mg/kg"),
-                "confidence": 0.0,
-                "method": "ml"
-            } for code in NUTRIENT_ORDER
-        }
-    # Ensure `sand` exists; compute if we have clay & silt
-    if "sand" not in features and "clay" in features and "silt" in features:
-        try:
-            features = dict(features)  # copy
-            features["sand"] = float(100 - (features.get("clay", 0) + features.get("silt", 0)))
-        except Exception:
-            pass
+# --------------------------------------
+# Classification Helper
+# --------------------------------------
+def classify_value(value, ranges):
+    for label, (lo, hi) in ranges.items():
+        if lo <= value < hi:
+            return label
+    return "unknown"
 
-    # Best-effort fix for feature-name warnings
-    _ensure_feature_names(model, FEATURE_ORDER)
 
-    # Create DataFrame with the exact column order expected by the trained model
-    try:
-        base_df = pd.DataFrame([[features.get(k, None) for k in FEATURE_ORDER]], columns=FEATURE_ORDER)
-        if hasattr(model, "feature_names_in_"):
-            # Align to training feature order to avoid sklearn feature-name warnings
-            ordered_cols = list(model.feature_names_in_)
-            df = base_df.reindex(columns=ordered_cols)
-            model_input = df
+# --------------------------------------
+# Hybrid Nitrogen Prediction
+# --------------------------------------
+def hybrid_nitrogen_prediction(features):
+
+    oc = features.get("OC", 0)
+    ndvi = features.get("NDVI_mean", 0)
+    ndmi = features.get("NDMI_mean", 0)
+    rainfall = features.get("rainfall_30d", 0)
+    ndvi_std = features.get("NDVI_std", 0)
+
+    oc = max(0, min(oc, 2))
+    ndvi = max(0, min(ndvi, 1))
+    ndmi = max(0, min(ndmi, 1))
+
+    nitrogen = (
+        oc * 140 +
+        ndvi * 80 +
+        ndmi * 60 +
+        rainfall * 0.3 +
+        ndvi_std * 40
+    )
+
+    if rainfall > 80:
+        nitrogen *= 0.9
+
+    if ndvi < 0.3:
+        nitrogen *= 0.85
+
+    if oc > 0.7:
+        nitrogen *= 1.1
+
+    if nitrogen < 100:
+        nitrogen *= 1.5
+
+    nitrogen = max(0, min(nitrogen, 700))
+
+    return nitrogen
+
+
+# --------------------------------------
+# Rule Engine
+# --------------------------------------
+def rule_adjustment(results, fertilizer=None, soil_type=None, irrigation=None):
+
+    adjusted = {}
+
+    for nutrient, data in results.items():
+        value = data["value"]
+
+        if fertilizer == "High":
+            if nutrient.lower() == "nitrogen":
+                value += 15
+            elif nutrient.lower() == "phosphorus":
+                value += 5
+            elif nutrient.lower() == "potassium":
+                value += 7
+
+        elif fertilizer == "Low":
+            if nutrient.lower() == "nitrogen":
+                value -= 10
+            elif nutrient.lower() == "phosphorus":
+                value -= 3
+
+        if soil_type == "Clayey" and nutrient.lower() == "potassium":
+            value += 10
+        elif soil_type == "Sandy" and nutrient.lower() == "potassium":
+            value -= 10
+
+        if irrigation == "Heavy" and nutrient.lower() == "nitrogen":
+            value -= 8
+
+        value = max(0, value)
+        adjusted[nutrient] = value
+
+    return adjusted
+
+
+# --------------------------------------
+# MAIN FUNCTION
+# --------------------------------------
+def make_classification_prediction(features: dict,
+                                   fertilizer=None,
+                                   soil_type=None,
+                                   irrigation=None):
+
+    features = dict(features)
+
+    # Mapping
+    if "pH" not in features and "pH_0_30" in features:
+        features["pH"] = features["pH_0_30"]
+
+    if "OC" not in features and "soc_0_30" in features:
+        features["OC"] = features["soc_0_30"]
+
+    if "rainfall_30d" not in features or features["rainfall_30d"] is None:
+        features["rainfall_30d"] = 50.0
+
+    soil_map = {
+        "Sandy": 0,
+        "Loamy": 1,
+        "Clayey": 2
+    }
+
+    fertilizer_map = {
+        "Low": 0,
+        "Medium": 1,
+        "High": 2
+    }
+
+    irrigation_map = {
+        "Rainfed": 0,
+        "Moderate": 1,
+        "Heavy": 2
+    }
+
+    soil_type_val = soil_map.get(soil_type if soil_type is not None else features.get("soil_type"), 0)
+    fertilizer_val = fertilizer_map.get(fertilizer if fertilizer is not None else features.get("fertilizer"), 0)
+    irrigation_val = irrigation_map.get(irrigation if irrigation is not None else features.get("irrigation"), 0)
+
+    features["soil_type"] = soil_type_val
+    features["fertilizer"] = fertilizer_val
+    features["irrigation"] = irrigation_val
+
+    # Build input
+    X = pd.DataFrame(
+        [[pd.to_numeric(features.get(f, 0), errors="coerce") for f in STAGE2_FEATURES]],
+        columns=STAGE2_FEATURES
+    ).fillna(0.0)
+
+    results = {}
+
+    # --------------------------------------
+    # PRIMARY PREDICTIONS
+    # --------------------------------------
+    for nutrient, model in STAGE2_MODELS.items():
+
+        name = nutrient.lower()
+
+        if name in ["n", "nitrogen"]:
+            pred_value = hybrid_nitrogen_prediction(features)
+            method_used = "hybrid (oc+ndvi+ndmi+rainfall)"
+            range_key = "N"
+
+        elif name in ["p", "phosphorus"]:
+            pred_value = float(model.predict(X)[0]) * 1.4
+            method_used = "ml + icar"
+            range_key = "P"
+
+        elif name in ["k", "potassium"]:
+            pred_value = float(model.predict(X)[0])
+            method_used = "ml + icar"
+            range_key = "K"
+
         else:
-            # Fall back to numpy array (no feature names used during training)
-            model_input = base_df.values
-    except Exception:
-        # Fallback to numpy array if DataFrame creation fails
-        model_input = np.array([list(features.values())])
+            pred_value = float(model.predict(X)[0])
+            method_used = "ml + icar"
+            range_key = nutrient
 
-    y_pred = model.predict(model_input)[0]
+        # Classification (NO conversion now ✅)
+        if range_key in NUTRIENT_RANGES:
+            status = classify_value(pred_value, NUTRIENT_RANGES[range_key])
+        else:
+            status = "unknown"
 
-    # Compute per-nutrient confidences based on model variability
-    confidences = compute_confidence_from_model(model, model_input, nutrient_keys=NUTRIENT_ORDER)
-
-    result = {}
-    for i, code in enumerate(NUTRIENT_ORDER):
-        conf = confidences[i] if i < len(confidences) else 0.8
-        result[code] = {
-            "value": float(y_pred[i]),
-            "unit": NUTRIENT_UNITS.get(code, "mg/kg"),
-            "confidence": float(conf),
-            "method": "ml"
+        results[nutrient] = {
+            "status": status,
+            "value": round(pred_value, 3),
+            "unit": "kg/ha",   # ✅ FINAL UNIT
+            "confidence": "medium",
+            "method": method_used
         }
 
-    return result
+    # --------------------------------------
+    # Sulfur & Boron
+    # --------------------------------------
+    try:
+        numeric_predictions = {k: v["value"] for k, v in results.items()}
+        extra = estimate_secondary_nutrients(features, numeric_predictions)
+
+        results["SULFUR"] = {
+            "status": "estimated",
+            "value": round(extra["SULFUR"], 3),
+            "unit": "kg/ha",
+            "confidence": "medium",
+            "method": "proxy"
+        }
+
+        results["BORON"] = {
+            "status": "estimated",
+            "value": round(extra["BORON"], 3),
+            "unit": "kg/ha",
+            "confidence": "medium",
+            "method": "proxy"
+        }
+
+    except Exception as e:
+        print("Sulfur/Boron error:", e)
+
+    # --------------------------------------
+    # HYBRID ADJUSTMENT + LIMIT
+    # --------------------------------------
+    adjusted_values = rule_adjustment(
+        results,
+        fertilizer=fertilizer,
+        soil_type=soil_type,
+        irrigation=irrigation
+    )
+
+    for nutrient in results:
+        ml_val = results[nutrient]["value"]
+        rule_val = adjusted_values.get(nutrient, ml_val)
+
+        final_val = (ml_val * 0.7) + (rule_val * 0.3)
+
+        # --------------------------------------
+        # CALIBRATION LAYER (Post-processing for numerical accuracy)
+        # --------------------------------------
+        # Apply nutrient-specific calibration to reduce systematic bias
+        # Based on validation against lab data: nitrogen under-predicted, phosphorus over-predicted, potassium clipped
+
+        if nutrient.lower() == "nitrogen":
+            # Stronger uplift for consistent low-bias on field validation rows.
+            final_val = final_val * 1.5 + 80.0
+            # Ensure within realistic agronomic bounds (0-700 kg/ha)
+            final_val = max(0, min(final_val, 700))
+
+        elif nutrient.lower() == "phosphorus":
+            # Aggressive downscale to correct systematic overestimation.
+            final_val = final_val * 0.5
+            # Ensure within realistic bounds (0-100 kg/ha)
+            final_val = max(0, min(final_val, 100))
+
+        elif nutrient.lower() == "potassium":
+            # De-clip and downscale potassium to reduce high-bias near cap.
+            final_val = final_val * 0.82
+            # Use wider bound so output can vary above 500 where needed.
+            final_val = max(0, min(final_val, 800))
+
+        else:
+            # For other nutrients, apply mild bounds checking without calibration changes
+            final_val = max(0, final_val)
+
+        results[nutrient]["value"] = round(final_val, 3)
+        results[nutrient]["method"] += " + rule-adjusted + calibrated"
+
+    return results

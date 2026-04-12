@@ -1,7 +1,31 @@
+<<<<<<< Updated upstream
+# =====================
+# Python / Environment
+# =====================
+=======
 # Ignore large ML models
-models/nutrient_model_v1.pkl
+models/nutrient_model_v2.pkl
+>>>>>>> Stashed changes
 __pycache__/
+*.pyc
 .env
+.env.*
 venv/
-*.pyc 
-*.pkl
+.venv/
+
+# =====================
+# ML Models (ALL versions)
+# =====================
+models/*.pkl
+models/*.joblib
+models/*.meta.json
+
+# =====================
+# Training / Satellite Data
+# =====================
+data/*.csv
+
+# =====================
+# Prediction Logs
+# =====================
+pred_log.csv

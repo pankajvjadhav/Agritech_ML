@@ -1,41 +1,55 @@
+# app/model_loader.py
+
 import joblib
 import os
 import json
-import sklearn
 import logging
-import subprocess
-import sys
-
-current_dir = os.path.dirname(__file__)
-MODEL_PATH = os.path.join(current_dir, "..", "models", "nutrient_model_v1.pkl")
-META_PATH = os.path.join(current_dir, "..", "models", "nutrient_model_v1.meta.json")
 
 logger = logging.getLogger(__name__)
 
-def ensure_model_exists():
-    if not os.path.exists(MODEL_PATH):
-        logger.warning("Model not found. Training model locally...")
-        subprocess.check_call(
-            [sys.executable, "tests/train_model.py"],
-            cwd=os.path.join(current_dir, "..")
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+STAGE2_MODEL_DIR = os.path.join(BASE_DIR, "models", "stage2")
+STAGE2_META_PATH = os.path.join(STAGE2_MODEL_DIR, "meta.json")
+
+# ✅ Correct nutrients (ML 2.0)
+NUTRIENTS = [
+    "nitrogen", "phosphorus", "potassium",
+    "iron", "manganese", "zinc", "copper"
+]
+
+
+def load_stage2_models():
+    models = {}
+
+    for nutrient in NUTRIENTS:
+        model_path = os.path.join(
+            STAGE2_MODEL_DIR,
+            f"{nutrient}_model.pkl"
         )
 
-def load_model():
-    ensure_model_exists()
-    model = joblib.load(MODEL_PATH)
-    logger.info("Loaded model from %s", MODEL_PATH)
-
-    # Optional metadata validation
-    if os.path.exists(META_PATH):
-        with open(META_PATH, "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
-        trained_version = meta.get("sklearn_version")
-        if trained_version != sklearn.__version__:
-            logger.warning(
-                "Model trained with sklearn %s but runtime is %s",
-                trained_version, sklearn.__version__
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Missing model: {model_path}"
             )
 
-    return model
+        models[nutrient] = joblib.load(model_path)
+        logger.info(f"Loaded model: {nutrient}")
 
-model = load_model()
+    return models
+
+
+def load_stage2_metadata():
+    if not os.path.exists(STAGE2_META_PATH):
+        raise FileNotFoundError("Stage-2 metadata file missing")
+
+    with open(STAGE2_META_PATH, "r") as f:
+        meta = json.load(f)
+
+    logger.info("Loaded Stage-2 metadata")
+    return meta
+
+
+# ✅ Load at startup
+STAGE2_MODELS = load_stage2_models()
+STAGE2_META = load_stage2_metadata()
+STAGE2_FEATURES = STAGE2_META["features"]

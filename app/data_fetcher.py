@@ -1,182 +1,274 @@
 import requests
-import json
 import time
 import numpy as np
 import pandas as pd
 import logging
 import os
 from typing import Dict, Any
+from datetime import datetime, timedelta
+
+from satellite_features.rainfall_features import get_rainfall_features
+from satellite_features.sentinel1_features import get_sentinel1_features
+from satellite_features.sentinel2_features import get_sentinel2_features
+from satellite_features.soil_type_features import get_soil_type
+from satellite_features.terrain_features import get_terrain_features
 
 logger = logging.getLogger(__name__)
 
-# Path to the static dataset
-DATASET_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static_dataset.csv")
+REQUEST_TIMEOUT = int(os.getenv("EXTERNAL_API_TIMEOUT", "45"))
+MAX_RETRIES = 3
 
-def fetch_soil_data(lat: float, lon: float) -> Dict[str, Any]:
-    """
-    Fetch soil data from ISRIC SoilGrids API.
-    Returns pH, SOC, clay, silt, sand for 0-30cm.
-    """
-    try:
-        url = f"https://rest.isric.org/soilgrids/v2.0/properties/query?lon={lon}&lat={lat}&property=phh2o&property=soc&property=clay&property=silt&property=sand&depth=0-30cm&value=mean"
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}")
-        data = response.json()
-        if 'properties' not in data:
-            raise Exception("No properties in response")
-        properties = data['properties']
-        ph = properties['phh2o']['layers'][0]['depths'][0]['values']['mean'] / 10.0
-        soc = properties['soc']['layers'][0]['depths'][0]['values']['mean'] / 100.0
-        clay = properties['clay']['layers'][0]['depths'][0]['values']['mean'] / 10.0
-        silt = properties['silt']['layers'][0]['depths'][0]['values']['mean'] / 10.0
-        sand = properties['sand']['layers'][0]['depths'][0]['values']['mean'] / 10.0
-        return {
-            "pH_0_30": ph,
-            "soc_0_30": soc,
-            "clay": clay,
-            "silt": silt,
-            "sand": sand
-        }
-    except Exception as e:
-        logger.warning("Failed to fetch soil data: %s. Using defaults.", e)
-        return {
-            "pH_0_30": 6.5,
-            "soc_0_30": 0.8,
-            "clay": 25,
-            "silt": 35,
-            "sand": 40
-        }
 
-def fetch_elevation(lat: float, lon: float) -> float:
-    """
-    Fetch elevation from Open-Elevation API.
-    """
-    try:
-        url = "https://api.open-elevation.com/api/v1/lookup"
-        payload = {"locations": [{"latitude": lat, "longitude": lon}]}
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}")
-        data = response.json()
-        return data['results'][0]['elevation']
-    except Exception as e:
-        logger.warning("Failed to fetch elevation: %s. Using default.", e)
-        return 300.0
+class ExternalDataFetchError(RuntimeError):
+    pass
 
-def fetch_rainfall(lat: float, lon: float, api_key: str = None) -> float:
-    """
-    Fetch 30-day rainfall from NASA POWER API (free).
-    """
-    try:
-        end_date = time.strftime("%Y%m%d")
-        start_date = time.strftime("%Y%m%d", time.localtime(time.time() - 30*24*3600))
-        url = f"https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOTCORR&community=RE&longitude={lon}&latitude={lat}&start={start_date}&end={end_date}&format=JSON"
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}")
-        data = response.json()
-        properties = data['properties']
-        rainfall_values = [v for v in properties['parameter']['PRECTOTCORR'].values() if v != -999]
-        rainfall = sum(rainfall_values)
-        return rainfall
-    except Exception as e:
-        logger.warning("Failed to fetch rainfall: %s. Using default.", e)
-        return 55.0
+DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "final_training_dataset.csv"
+)
 
-def fetch_satellite_indices(lat: float, lon: float, api_key: str = None) -> Dict[str, Any]:
-    """
-    Fetch satellite indices from Agromonitoring API.
-    Requires API key from https://agromonitoring.com/
-    """
-    if not api_key:
-        # Fallback to dummy data
-        return {
-            "ndvi_mean_90d": 0.45,
-            "ndvi_trend_30d": 0.02,
-            "ndvi_std_90d": 0.08,
-            "ndre_mean_90d": 0.18,
-            "bsi_mean_90d": 0.04,
-            "valid_obs_count": 6,
-            "cloud_pct": 12
-        }, {"sat_source": "placeholder", "api_key_used": False}
-    
-    # Agromonitoring API for NDVI
-    # First, get polygon or use point
-    # For simplicity, use a small polygon around the point
-    polygon = {
-        "type": "Polygon",
-        "coordinates": [[
-            [lon-0.01, lat-0.01],
-            [lon+0.01, lat-0.01],
-            [lon+0.01, lat+0.01],
-            [lon-0.01, lat+0.01],
-            [lon-0.01, lat-0.01]
-        ]]
-    }
-    
-    # Get NDVI stats
-    url = "https://api.agromonitoring.com/agro/1.0/ndvi/history"
-    params = {
-        "appid": api_key,
-        "start": int(time.time() - 90*24*3600),  # 90 days ago
-        "end": int(time.time())
-    }
-    try:
-        response = requests.post(url, json=polygon, params=params, timeout=10)
-    except Exception as e:
-        # treat as failure and fall back
-        logger.warning("Agromonitoring API error (POST): %s", e)
-        response = None
-        response = None
-    if response is None or response.status_code != 200:
-        if response is not None:
-            logger.warning("Agromonitoring API error (POST): %s - %s", response.status_code, response.text)
-        # Try a fallback GET using lat/lon as query params (account/api may require GET or point lookup)
+
+def _http_get_json(url: str, source: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            params_get = params.copy()
-            params_get.update({"lat": lat, "lon": lon})
-            response_get = requests.get(url, params=params_get, timeout=10)
-            if response_get.status_code == 200:
-                ndvi_data = response_get.json()
-                response = response_get
-                api_ok = True
-            else:
-                print(f"Agromonitoring API error (GET fallback): {response_get.status_code} - {response_get.text}")
-                raise Exception("Failed to fetch NDVI data")
+            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            if response.status_code != 200:
+                raise ExternalDataFetchError(
+                    f"{source} request failed (status={response.status_code}): {response.text[:200]}"
+                )
+            return response.json()
         except Exception as e:
-            logger.warning("Agromonitoring API GET fallback error: %s", e)
-            raise Exception("Failed to fetch NDVI data") from e
-    ndvi_data = response.json()
-    api_ok = True
-    
-    # Process NDVI data
-    ndvi_values = [item['data']['ndvi'] for item in ndvi_data if 'data' in item and 'ndvi' in item['data']]
-    if not ndvi_values:
-        ndvi_mean = 0.45
-        ndvi_std = 0.08
-        ndvi_trend = 0.02
+            last_error = e
+            logger.warning("%s attempt %s/%s failed: %s", source, attempt, MAX_RETRIES, e)
+
+    raise ExternalDataFetchError(f"{source} unavailable after retries: {last_error}")
+
+
+def _weighted_topsoil_mean(layer: Dict[str, Any]) -> float:
+    depths = layer.get("depths", [])
+    d_factor = float(layer.get("unit_measure", {}).get("d_factor", 1.0) or 1.0)
+    weights = {
+        "0-5cm": 5.0,
+        "5-15cm": 10.0,
+        "15-30cm": 15.0,
+    }
+
+    total = 0.0
+    weight_sum = 0.0
+
+    for depth in depths:
+        label = depth.get("label")
+        mean_val = depth.get("values", {}).get("mean")
+        if label in weights and mean_val is not None:
+            total += (float(mean_val) / d_factor) * weights[label]
+            weight_sum += weights[label]
+
+    if weight_sum > 0:
+        return total / weight_sum
+
+    if depths:
+        fallback_mean = depths[0].get("values", {}).get("mean")
+        if fallback_mean is not None:
+            return float(fallback_mean) / d_factor
+
+    raise ExternalDataFetchError("SoilGrids layer has no usable depth values")
+
+
+def _extract_soil_property(properties: Dict[str, Any], name: str) -> float:
+    for layer in properties.get("layers", []):
+        if layer.get("name") == name:
+            return _weighted_topsoil_mean(layer)
+    raise ExternalDataFetchError(f"Missing soil property '{name}' in SoilGrids response")
+
+
+def _to_float_or_none(value: Any):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_ec(soil_moisture, clay_content, oc_value, rainfall_mean):
+    moisture = _to_float_or_none(soil_moisture)
+    clay = _to_float_or_none(clay_content)
+    oc = _to_float_or_none(oc_value)
+    rain = _to_float_or_none(rainfall_mean)
+
+    if moisture is None:
+        return None, None
+
+    moisture = max(0.0, min(moisture, 1.0))
+    if moisture < 0.2:
+        category = "Low"
+    elif moisture < 0.5:
+        category = "Medium"
     else:
-        ndvi_mean = np.mean(ndvi_values)
-        ndvi_std = np.std(ndvi_values)
-        # Trend: simple difference
-        if len(ndvi_values) > 1:
-            ndvi_trend = (ndvi_values[-1] - ndvi_values[0]) / len(ndvi_values) * 30  # rough
-        else:
-            ndvi_trend = 0.02
-    
-    # For NDRE, BSI, etc., similar, but API may not have all. Use defaults or extend.
-    # For now, use defaults for others
-    meta = {"sat_source": "agromonitoring", "api_key_used": bool(api_key)}
+        category = "High"
+
+    # Numeric EC is emitted only when all primary inputs are available.
+    if clay is None or oc is None or rain is None:
+        return None, category
+
+    ec_value = (moisture * 2.5) + (clay * 0.1) + (oc * 1.2)
+    return round(ec_value, 3), category
+
+# -------------------------------
+# SOIL DATA
+# -------------------------------
+def fetch_soil_data(lat: float, lon: float) -> Dict[str, Any]:
+    url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+    params = {
+        "lon": lon,
+        "lat": lat,
+        "property": ["phh2o", "soc", "clay", "silt", "sand"],
+    }
+    data = _http_get_json(url, source="SoilGrids", params=params)
+
+    properties = data.get("properties", {})
+    ph = _extract_soil_property(properties, "phh2o")
+    soc = _extract_soil_property(properties, "soc")
+    clay = _extract_soil_property(properties, "clay")
+    silt = _extract_soil_property(properties, "silt")
+    sand = _extract_soil_property(properties, "sand")
+
+    # Keep OC in a percentage-like range similar to training scale.
+    oc = soc / 100.0
+
+    if sand >= 55 and clay < 25:
+        soil_type = "Sandy"
+    elif clay >= 35:
+        soil_type = "Clayey"
+    else:
+        soil_type = "Loamy"
+
+    # Dynamic EC proxy based on live soil texture/OC instead of static constants.
+    ec = max(0.05, min(2.5, 0.08 + 0.003 * clay + 0.2 * oc))
+
     return {
-        "ndvi_mean_90d": ndvi_mean,
-        "ndvi_trend_30d": ndvi_trend,
-        "ndvi_std_90d": ndvi_std,
-        "ndre_mean_90d": 0.18,  # Placeholder
-        "bsi_mean_90d": 0.04,   # Placeholder
-        "valid_obs_count": len(ndvi_values),
-        "cloud_pct": 12  # Placeholder
-    }, meta
+        "ph": ph,
+        "oc": oc,
+        "ec": ec,
+        "soil_type": soil_type,
+        "clay": clay,
+        "silt": silt,
+        "sand": sand,
+    }
+
+
+# -------------------------------
+# MAIN FUNCTION
+# -------------------------------
+def fetch_real_time_data(lat: float, lon: float, area_ha: float = 1.0, satellite_api_key: str = None, use_dataset: bool = False):
+
+    if use_dataset:
+        raise ExternalDataFetchError("Dataset fallback is disabled in production realtime mode")
+
+    soil_data = fetch_soil_data(lat, lon)
+
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=30)
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+
+    terrain = get_terrain_features(lat, lon)
+    rainfall = get_rainfall_features(lat, lon, start_date_str, end_date_str)
+    sentinel2 = get_sentinel2_features(lat, lon, start_date_str, end_date_str)
+    sentinel1 = get_sentinel1_features(lat, lon, start_date_str, end_date_str)
+    gee_soil_type = get_soil_type(lat, lon)
+
+    month = datetime.utcnow().month
+    ndvi_mean = sentinel2["NDVI_mean"]
+    ndmi_mean = sentinel2["NDMI_mean"]
+    bsi_mean = sentinel2["BSI_mean"]
+    nbr2_mean = sentinel2["NBR2_mean"]
+    vv_mean = sentinel1["VV_mean"]
+    vh_mean = sentinel1["VH_mean"]
+    vv_vh_ratio = sentinel1["VV_VH_ratio_mean"]
+    lst_mean = max(0.0, 42.0 - 18.0 * ndvi_mean)
+    ph = soil_data["ph"]
+    ec = soil_data["ec"]
+    oc = soil_data["oc"]
+    elevation = terrain["elevation"]
+    slope = terrain["slope"]
+    rainfall_sum = rainfall["rainfall_sum"]
+    rainfall_mean = rainfall["rainfall_mean"]
+    rainfall_max = rainfall["rainfall_max"]
+    rainy_days = rainfall["rainy_days"]
+
+    # Moisture proxy from NDMI plus rainfall intensity for EC categorization.
+    ndmi_norm = max(0.0, min((ndmi_mean + 1.0) / 2.0, 1.0))
+    rain_norm = max(0.0, min(rainfall_mean / 10.0, 1.0))
+    soil_moisture = (ndmi_norm * 0.7) + (rain_norm * 0.3)
+
+    oc_value = _to_float_or_none(soil_data.get("oc"))
+    ec_estimated_value, ec_category = _estimate_ec(
+        soil_moisture=soil_moisture,
+        clay_content=soil_data.get("clay"),
+        oc_value=oc_value,
+        rainfall_mean=rainfall_mean,
+    )
+
+    logger.info("OC VALUE: %s", oc_value)
+    logger.info("EC ESTIMATION: %s %s", ec_estimated_value, ec_category)
+
+    soil_type_lookup = {
+        0: soil_data["soil_type"],
+        1: "Sandy",
+        2: "Loamy",
+        3: "Clayey",
+    }
+    soil_type = soil_type_lookup.get(gee_soil_type.get("soil_type", 0), soil_data["soil_type"])
+
+    features = {
+        "NDVI_mean": ndvi_mean,
+        "NDMI_mean": ndmi_mean,
+        "BSI_mean": bsi_mean,
+        "NBR2_mean": nbr2_mean,
+        "VV_mean": vv_mean,
+        "VH_mean": vh_mean,
+        "VV_VH_ratio_mean": vv_vh_ratio,
+        "elevation": elevation,
+        "slope": slope,
+        "LST_mean": lst_mean,
+        "rainfall_sum": rainfall_sum,
+        "rainfall_mean": rainfall_mean,
+        "rainfall_max": rainfall_max,
+        "rainy_days": rainy_days,
+        "soil_type": soil_type,
+        "month": month,
+        "ph": ph,
+        "ec": ec,
+        "oc": oc,
+        "NDVI_rainfall": ndvi_mean * rainfall_mean,
+        "OC_rainfall": oc * rainfall_mean,
+        "pH_OC": ph * oc,
+        "slope_rainfall": slope * rainfall_mean,
+        "temp_moisture": lst_mean * rainfall_mean,
+        "NDVI_OC": ndvi_mean * oc,
+        "NDMI_rain": ndmi_mean * rainfall_mean
+    }
+
+    meta = {
+        "satellite_source": "gee",
+        "soil_source": "soilgrids",
+        "terrain_source": "gee",
+        "rainfall_source": "gee",
+        "api_key_used": False,
+        "properties": {
+            "oc": oc_value,
+            "ec": {
+                "value": ec_estimated_value,
+                "category": ec_category,
+            },
+        },
+    }
+
+    return features, meta
 
 def fetch_from_dataset(index: int = None) -> Dict[str, Any]:
     """
@@ -200,23 +292,53 @@ def fetch_from_dataset(index: int = None) -> Dict[str, Any]:
         
         row = df.iloc[index]
         
-        # Convert to dictionary with proper types
+        ndvi_mean = float(row["NDVI_mean"])
+        ndmi_mean = float(row["NDMI_mean"])
+        bsi_mean = float(row["BSI_mean"])
+        nbr2_mean = float(row["NBR2_mean"])
+        vv_mean = float(row["VV_mean"])
+        vh_mean = float(row["VH_mean"])
+        vv_vh_ratio = float(row["VV_VH_ratio_mean"])
+        elevation = float(row["elevation"])
+        slope = float(row["slope"])
+        lst_mean = float(row["LST_mean"])
+        rainfall_sum = float(row["rainfall_sum"])
+        rainfall_mean = float(row["rainfall_mean"])
+        rainfall_max = float(row["rainfall_max"])
+        rainy_days = int(row["rainy_days"])
+        soil_type = str(row["soil_type"])
+        month = int(row["month"])
+        ph = float(row["ph"])
+        ec = float(row["ec"])
+        oc = float(row["oc"])
+
         features = {
-            "ndvi_mean_90d": float(row["ndvi_mean_90d"]),
-            "ndvi_trend_30d": float(row["ndvi_trend_30d"]),
-            "pH_0_30": float(row["pH_0_30"]),
-            "soc_0_30": float(row["soc_0_30"]),
-            "clay": float(row["clay"]),
-            "silt": float(row["silt"]),
-            "sand": float(row["sand"]),
-            "ndvi_std_90d": float(row["ndvi_std_90d"]),
-            "ndre_mean_90d": float(row["ndre_mean_90d"]),
-            "bsi_mean_90d": float(row["bsi_mean_90d"]),
-            "valid_obs_count": int(row["valid_obs_count"]),
-            "cloud_pct": float(row["cloud_pct"]),
-            "area_ha": float(row["area_ha"]),
-            "elevation": float(row["elevation"]),
-            "rainfall_30d": float(row["rainfall_30d"])
+            "NDVI_mean": ndvi_mean,
+            "NDMI_mean": ndmi_mean,
+            "BSI_mean": bsi_mean,
+            "NBR2_mean": nbr2_mean,
+            "VV_mean": vv_mean,
+            "VH_mean": vh_mean,
+            "VV_VH_ratio_mean": vv_vh_ratio,
+            "elevation": elevation,
+            "slope": slope,
+            "LST_mean": lst_mean,
+            "rainfall_sum": rainfall_sum,
+            "rainfall_mean": rainfall_mean,
+            "rainfall_max": rainfall_max,
+            "rainy_days": rainy_days,
+            "soil_type": soil_type,
+            "month": month,
+            "ph": ph,
+            "ec": ec,
+            "oc": oc,
+            "NDVI_rainfall": ndvi_mean * rainfall_mean,
+            "OC_rainfall": oc * rainfall_mean,
+            "pH_OC": ph * oc,
+            "slope_rainfall": slope * rainfall_mean,
+            "temp_moisture": lst_mean * rainfall_mean,
+            "NDVI_OC": ndvi_mean * oc,
+            "NDMI_rain": ndmi_mean * rainfall_mean,
         }
         
         meta = {
@@ -231,158 +353,3 @@ def fetch_from_dataset(index: int = None) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to fetch data from dataset at index {index}: {e}")
         raise
-
-def find_closest_dataset_row(lat: float = None, lon: float = None, target_features: Dict[str, Any] = None) -> int:
-    """
-    Find the closest matching row in the dataset based on location or feature similarity.
-    Returns the index of the closest row.
-    
-    Priority:
-    1. If target_features provided, find closest by feature similarity
-    2. If lat/lon provided, try to match by elevation/rainfall (proxy for location)
-    3. Otherwise return random index
-    """
-    try:
-        if not os.path.exists(DATASET_PATH):
-            raise FileNotFoundError(f"Dataset file not found at {DATASET_PATH}")
-        
-        df = pd.read_csv(DATASET_PATH)
-        
-        if len(df) == 0:
-            raise ValueError("Dataset is empty")
-        
-        # If target features provided, find closest match by feature similarity
-        if target_features:
-            # Features to match on (excluding area_ha which is user-specific)
-            match_features = [
-                "ndvi_mean_90d", "ndvi_trend_30d", "pH_0_30", "soc_0_30",
-                "clay", "silt", "sand", "elevation", "rainfall_30d"
-            ]
-            
-            # Build query vector
-            query_values = []
-            for feat in match_features:
-                query_values.append(target_features.get(feat, 0))
-            
-            # Calculate distances to all rows
-            distances = []
-            for idx, row in df.iterrows():
-                row_values = [float(row[feat]) for feat in match_features]
-                # Euclidean distance
-                dist = np.sqrt(sum((q - r) ** 2 for q, r in zip(query_values, row_values)))
-                distances.append((dist, idx))
-            
-            # Return index of closest match
-            distances.sort()
-            return int(distances[0][1])
-        
-        # If lat/lon provided, try to match by elevation/rainfall
-        # (This is a simple heuristic - in production you'd want location in dataset)
-        if lat is not None and lon is not None:
-            try:
-                # Try to get elevation for this location
-                elevation = fetch_elevation(lat, lon)
-                rainfall = fetch_rainfall(lat, lon)
-                
-                # Find closest match by elevation and rainfall
-                distances = []
-                for idx, row in df.iterrows():
-                    elev_diff = abs(float(row["elevation"]) - elevation)
-                    rain_diff = abs(float(row["rainfall_30d"]) - rainfall)
-                    dist = elev_diff + rain_diff * 0.1  # Weight rainfall less
-                    distances.append((dist, idx))
-                
-                distances.sort()
-                return int(distances[0][1])
-            except Exception as e:
-                logger.warning(f"Could not fetch elevation/rainfall for matching: {e}. Using random.")
-        
-        # Fallback: return random index
-        return np.random.randint(0, len(df))
-        
-    except Exception as e:
-        logger.error(f"Error finding closest dataset row: {e}")
-        # Return random index as fallback
-        if os.path.exists(DATASET_PATH):
-            df = pd.read_csv(DATASET_PATH)
-            return np.random.randint(0, len(df))
-        raise
-
-def fetch_real_time_data(lat: float, lon: float, area_ha: float = 1.0, satellite_api_key: str = None, use_dataset: bool = True):
-    """
-    Fetch all real-time data for the given location.
-    If use_dataset is True, randomly selects from static dataset instead of calling APIs.
-    """
-    if use_dataset:
-        # Use random row from static dataset
-        try:
-            if not os.path.exists(DATASET_PATH):
-                raise FileNotFoundError(f"Dataset file not found at {DATASET_PATH}")
-            
-            df = pd.read_csv(DATASET_PATH)
-            if len(df) == 0:
-                raise ValueError("Dataset is empty")
-            
-            # Randomly select a row
-            random_idx = np.random.randint(0, len(df))
-            row = df.iloc[random_idx]
-            
-            # Use area_ha from parameter, but keep other values from dataset
-            features = {
-                "ndvi_mean_90d": float(row["ndvi_mean_90d"]),
-                "ndvi_trend_30d": float(row["ndvi_trend_30d"]),
-                "pH_0_30": float(row["pH_0_30"]),
-                "soc_0_30": float(row["soc_0_30"]),
-                "clay": float(row["clay"]),
-                "silt": float(row["silt"]),
-                "sand": float(row["sand"]),
-                "ndvi_std_90d": float(row["ndvi_std_90d"]),
-                "ndre_mean_90d": float(row["ndre_mean_90d"]),
-                "bsi_mean_90d": float(row["bsi_mean_90d"]),
-                "valid_obs_count": int(row["valid_obs_count"]),
-                "cloud_pct": float(row["cloud_pct"]),
-                "area_ha": area_ha,  # Use provided area_ha
-                "elevation": float(row["elevation"]),
-                "rainfall_30d": float(row["rainfall_30d"])
-            }
-            
-            meta = {
-                "source": "static_dataset_random",
-                "dataset_path": DATASET_PATH,
-                "row_index": int(random_idx),
-                "total_rows": len(df),
-                "location": {"lat": lat, "lon": lon}
-            }
-            
-            logger.info(f"Using random dataset row {random_idx} for location ({lat}, {lon})")
-            return features, meta
-            
-        except Exception as e:
-            logger.warning(f"Failed to use dataset, falling back to API: {e}")
-            # Fall through to API calls below
-    
-    # Original API-based approach (fallback)
-    soil_data = fetch_soil_data(lat, lon)
-    elevation = fetch_elevation(lat, lon)
-    rainfall = fetch_rainfall(lat, lon)
-    satellite_data, sat_meta = fetch_satellite_indices(lat, lon, satellite_api_key)
-    
-    features = {
-        "ndvi_mean_90d": satellite_data["ndvi_mean_90d"],
-        "ndvi_trend_30d": satellite_data["ndvi_trend_30d"],
-        "pH_0_30": soil_data["pH_0_30"],
-        "soc_0_30": soil_data["soc_0_30"],
-        "clay": soil_data["clay"],
-        "silt": soil_data["silt"],
-        "sand": soil_data["sand"],
-        "ndvi_std_90d": satellite_data["ndvi_std_90d"],
-        "ndre_mean_90d": satellite_data["ndre_mean_90d"],
-        "bsi_mean_90d": satellite_data["bsi_mean_90d"],
-        "valid_obs_count": satellite_data["valid_obs_count"],
-        "cloud_pct": satellite_data["cloud_pct"],
-        "area_ha": area_ha,
-        "elevation": elevation,
-        "rainfall_30d": rainfall
-    }
-    meta = {"satellite_source": sat_meta.get('sat_source'), "api_key_used": sat_meta.get('api_key_used')}
-    return features, meta

@@ -1,0 +1,42 @@
+{
+  "stage": "stage2",
+  "created_at": "2026-04-01T18:00:58.856064",
+  "features": [
+    "NDVI_mean",
+    "NDMI_mean",
+    "BSI_mean",
+    "NBR2_mean",
+    "VV_mean",
+    "VH_mean",
+    "VV_VH_ratio_mean",
+    "elevation",
+    "slope",
+    "LST_mean",
+    "rainfall_sum",
+    "rainfall_mean",
+    "rainfall_max",
+    "rainy_days",
+    "soil_type",
+    "month",
+    "ph",
+    "ec",
+    "oc",
+    "NDVI_rainfall",
+    "OC_rainfall",
+    "pH_OC",
+    "slope_rainfall",
+    "temp_moisture",
+    "NDVI_OC",
+    "NDMI_rain"
+  ],
+  "targets": [
+    "nitrogen",
+    "phosphorus",
+    "potassium",
+    "iron",
+    "manganese",
+    "zinc",
+    "copper"
+  ],
+  "sklearn_version": "1.7.2"
+}

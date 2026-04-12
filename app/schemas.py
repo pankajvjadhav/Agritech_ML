@@ -1,46 +1,82 @@
 from pydantic import BaseModel
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Literal
 
+
+# -------------------------------
+# EXISTING FEATURE INPUT (UNCHANGED)
+# -------------------------------
 class FeatureRequest(BaseModel):
-    ndvi_mean_90d: float
-    ndvi_trend_30d: float
-    pH_0_30: float
-    soc_0_30: float
-    clay: float
-    silt: float
-    sand: float
-    ndvi_std_90d: float
-    ndre_mean_90d: float
-    bsi_mean_90d: float
-    valid_obs_count: int
-    cloud_pct: float
-    area_ha: float
+    NDVI_mean: float
+    NDMI_mean: float
+    BSI_mean: float
+    NBR2_mean: float
+    VV_mean: float
+    VH_mean: float
+    VV_VH_ratio_mean: float
     elevation: float
-    rainfall_30d: float
+    slope: float
+    LST_mean: float
+    rainfall_sum: float
+    rainfall_mean: float
+    rainfall_max: float
+    rainy_days: int
+    soil_type: Literal["Sandy", "Loamy", "Clayey"]
+    month: int
+    ph: float
+    ec: float
+    oc: float
+    NDVI_rainfall: float
+    OC_rainfall: float
+    pH_OC: float
+    slope_rainfall: float
+    temp_moisture: float
+    NDVI_OC: float
+    NDMI_rain: float
 
+
+# -------------------------------
+# NEW: FARMER INPUT (ADDED)
+# -------------------------------
+class FarmerInput(BaseModel):
+    fertilizer: Optional[Literal["Low", "Medium", "High"]] = "Medium"
+    soil_type: Optional[Literal["Sandy", "Loamy", "Clayey"]] = "Loamy"
+    irrigation: Optional[Literal["Rainfed", "Moderate", "Heavy"]] = "Moderate"
+
+
+# -------------------------------
+# NEW: HYBRID REQUEST (ADDED)
+# -------------------------------
+class HybridPredictionRequest(BaseModel):
+    features: FeatureRequest
+    farmer_input: Optional[FarmerInput] = None
+
+
+# -------------------------------
+# EXISTING (UNCHANGED)
+# -------------------------------
 class LocationRequest(BaseModel):
     lat: float
     lon: float
     area_ha: Optional[float] = 1.0
     satellite_api_key: Optional[str] = None
 
+
 class IndexRequest(BaseModel):
     index: Optional[int] = None
-    """Index of the row in the dataset (0-based). If None, uses closest match or random."""
     lat: Optional[float] = None
-    """Optional latitude to find closest matching row."""
     lon: Optional[float] = None
-    """Optional longitude to find closest matching row."""
 
 
 class NutrientResult(BaseModel):
-    value: Optional[float] = None
-    unit: str = "mg/kg"
-    confidence: float = 0.0
-    method: str = "ml"
+    status: str
+    value: float
+    unit: str
+    confidence: str
+    method: str
 
 
 class PredictionResponse(BaseModel):
     success: bool
     predictions: Dict[str, NutrientResult]
     meta: Optional[Dict[str, Any]] = None
+    properties: Optional[Dict[str, Any]] = None
