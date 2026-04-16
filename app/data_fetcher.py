@@ -131,13 +131,23 @@ def fetch_soil_data(lat: float, lon: float) -> Dict[str, Any]:
 
     properties = data.get("properties", {})
     ph = _extract_soil_property(properties, "phh2o")
-    soc = _extract_soil_property(properties, "soc")
+    # --- Weighted OC calculation (0-30cm) ---
+    soc_layer = None
+    for layer in properties.get("layers", []):
+        if layer.get("name") == "soc":
+            soc_layer = layer
+            break
+    soc_weighted = None
+    if soc_layer:
+        soc_weighted = _weighted_topsoil_mean(soc_layer)
+    else:
+        soc_weighted = 0.0
+    oc = soc_weighted / 100.0
+    print(f"[SoilGrids] Weighted SOC (0-30cm): {soc_weighted} g/kg, OC: {oc} %")
+
     clay = _extract_soil_property(properties, "clay")
     silt = _extract_soil_property(properties, "silt")
     sand = _extract_soil_property(properties, "sand")
-
-    # Keep OC in a percentage-like range similar to training scale.
-    oc = soc / 100.0
 
     if sand >= 55 and clay < 25:
         soil_type = "Sandy"
