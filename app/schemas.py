@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, Optional, Any, Literal
 
 
@@ -21,7 +21,7 @@ class FeatureRequest(BaseModel):
     rainfall_max: float
     rainy_days: int
     soil_type: Literal["Sandy", "Loamy", "Clayey"]
-    month: int
+    month: int = Field(..., ge=1, le=12)
     ph: float
     ec: float
     oc: float
@@ -55,16 +55,22 @@ class HybridPredictionRequest(BaseModel):
 # EXISTING (UNCHANGED)
 # -------------------------------
 class LocationRequest(BaseModel):
-    lat: float
-    lon: float
-    area_ha: Optional[float] = 1.0
+    lat: float = Field(..., ge=-90.0, le=90.0, description="Latitude in decimal degrees")
+    lon: float = Field(..., ge=-180.0, le=180.0, description="Longitude in decimal degrees")
+    area_ha: Optional[float] = Field(1.0, gt=0.0, le=100000.0)
     satellite_api_key: Optional[str] = None
+    # When supplied (YYYY-MM-DD), the Earth Engine fetch uses the
+    # 30-day window ENDING at this date instead of "today minus 30
+    # days". Lets the soil dashboard surface the field's predicted
+    # state on a past satellite pass — drives the "score over time"
+    # demo flow.
+    sample_date: Optional[str] = None
 
 
 class IndexRequest(BaseModel):
-    index: Optional[int] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
+    index: Optional[int] = Field(None, ge=0)
+    lat: Optional[float] = Field(None, ge=-90.0, le=90.0)
+    lon: Optional[float] = Field(None, ge=-180.0, le=180.0)
 
 
 class NutrientResult(BaseModel):

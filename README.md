@@ -42,14 +42,7 @@ models/nutrient_model_v2.pkl
 
 (Manual training via `python train_model.py` is optional.)
 
-```
-
-<<<<<<< Updated upstream
-A trained model will be saved to `data/satellite_input_data.csv
-`.
-=======
 A trained model will be saved to `models/nutrient_model_v2.pkl`.
->>>>>>> Stashed changes
 
 4. Run the app
 

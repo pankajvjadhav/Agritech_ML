@@ -1,10 +1,14 @@
-fastapi
-uvicorn
+# Runtime dependencies (pinned for reproducibility)
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+numpy==2.1.3
 scikit-learn==1.7.2
-pydantic
-numpy
-joblib
-requests
-pandas
-pytest
-earthengine-api
+joblib==1.4.2
+pandas==2.2.3
+requests==2.32.3
+earthengine-api==1.2.0
+python-dotenv==1.2.2
+
+# Development / tests (consider moving to requirements-dev.txt)
+pytest==8.3.4

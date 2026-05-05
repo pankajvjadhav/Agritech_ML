@@ -95,7 +95,8 @@ def predict_realtime(payload: LocationRequest):
             payload.lon,
             payload.area_ha,
             payload.satellite_api_key,
-            use_dataset=False
+            use_dataset=False,
+            sample_date=payload.sample_date,
         )
     except ExternalDataFetchError as e:
         raise HTTPException(status_code=502, detail=str(e))

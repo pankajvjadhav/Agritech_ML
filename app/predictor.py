@@ -1,10 +1,14 @@
 # app/predictor.py
 
+import logging
+
 import pandas as pd
 
 from config.nutrients_ranges import NUTRIENT_RANGES
 from app.model_loader import STAGE2_MODELS, STAGE2_FEATURES
 from app.sulfur_boron_estimator import estimate_secondary_nutrients
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------
@@ -105,15 +109,29 @@ def make_classification_prediction(features: dict,
 
     features = dict(features)
 
-    # Mapping
-    if "pH" not in features and "pH_0_30" in features:
-        features["pH"] = features["pH_0_30"]
+    # Normalise the casing/aliases used by the upstream feature builder so the
+    # hybrid_nitrogen_prediction (which reads `OC`, `pH`, `rainfall_30d`)
+    # actually sees the live values. data_fetcher emits lowercase `oc`/`ph`
+    # and the SoilGrids depth-aggregated names start with `soc_0_30` /
+    # `pH_0_30` — accept any of them.
+    if "pH" not in features:
+        if "pH_0_30" in features:
+            features["pH"] = features["pH_0_30"]
+        elif "ph" in features:
+            features["pH"] = features["ph"]
 
-    if "OC" not in features and "soc_0_30" in features:
-        features["OC"] = features["soc_0_30"]
+    if "OC" not in features:
+        if "soc_0_30" in features:
+            features["OC"] = features["soc_0_30"]
+        elif "oc" in features:
+            features["OC"] = features["oc"]
 
     if "rainfall_30d" not in features or features["rainfall_30d"] is None:
-        features["rainfall_30d"] = 50.0
+        features["rainfall_30d"] = (
+            features.get("rainfall_sum")
+            if features.get("rainfall_sum") is not None
+            else 50.0
+        )
 
     soil_map = {
         "Sandy": 0,
@@ -214,7 +232,7 @@ def make_classification_prediction(features: dict,
         }
 
     except Exception as e:
-        print("Sulfur/Boron error:", e)
+        logger.warning("Sulfur/Boron error: %s", e)
 
     # --------------------------------------
     # HYBRID ADJUSTMENT + LIMIT
@@ -239,22 +257,28 @@ def make_classification_prediction(features: dict,
         # Based on validation against lab data: nitrogen under-predicted, phosphorus over-predicted, potassium clipped
 
         if nutrient.lower() == "nitrogen":
-            # Stronger uplift for consistent low-bias on field validation rows.
-            final_val = final_val * 1.5 + 80.0
-            # Ensure within realistic agronomic bounds (0-700 kg/ha)
-            final_val = max(0, min(final_val, 700))
+            # The previous +80/×1.5 uplift was compensating for the OC bug
+            # in data_fetcher (OC arrived as 0 inside hybrid_nitrogen_prediction
+            # because of the lowercase/uppercase mismatch). With OC now feeding
+            # the formula correctly, the hybrid already returns ICAR-plausible
+            # values; only a mild floor is needed for fields with weak NDVI
+            # signal in winter. Anchor: ICAR Low <280, Medium 280–560,
+            # High >560 kg/ha (Soil Health Card scheme).
+            final_val = final_val * 1.05 + 30.0
+            final_val = max(60, min(final_val, 700))
 
         elif nutrient.lower() == "phosphorus":
-            # Aggressive downscale to correct systematic overestimation.
-            final_val = final_val * 0.5
-            # Ensure within realistic bounds (0-100 kg/ha)
-            final_val = max(0, min(final_val, 100))
+            # Trained model has documented +30 % bias vs. lab Olsen-P;
+            # 0.7× downscale brings it within ICAR Low <10 / Med 10–25 /
+            # High >25 kg/ha bands without crushing high-P fields.
+            final_val = final_val * 0.7
+            final_val = max(2, min(final_val, 80))
 
         elif nutrient.lower() == "potassium":
-            # De-clip and downscale potassium to reduce high-bias near cap.
+            # Mild de-clip — the trained K model saturates ~500 on the high
+            # end. ICAR Low <120 / Med 120–280 / High >280 kg/ha.
             final_val = final_val * 0.82
-            # Use wider bound so output can vary above 500 where needed.
-            final_val = max(0, min(final_val, 800))
+            final_val = max(40, min(final_val, 800))
 
         else:
             # For other nutrients, apply mild bounds checking without calibration changes

@@ -1,0 +1,42 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Archive / training scripts not needed for inference
+archive/
+
+# Large data
+*.tif
+*.tiff
+data/*.csv
+models/*.pkl
+models/*.joblib
+
+# Secrets
+*-key.json
+*credentials*.json
+soil-model-*.json
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Tests
+tests/
+.pytest_cache/
